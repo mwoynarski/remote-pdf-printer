@@ -1,14 +1,18 @@
-const express = require('express');
-const fs = require('fs');
-const https = require('https');
-const logger = require('morgan');
-const helmet = require('helmet');
-const constants = require('constants');
-const multer = require('multer');
+
+import express from 'express';
+import fs from 'fs';
+import https from 'https';
+import logger from 'morgan';
+import helmet from 'helmet';
+import multer from 'multer';
+import bodyParser from 'body-parser';
+import pdfRoutes from './api/routes/printPdfRoutes.js';
+import pngRoutes from './api/routes/printPngRoutes.js';
+import constants from 'constants';
 
 let formMulter = multer();
 
-app = express();
+const app = express();
 
 const options = {
 	port: process.env.PORT || 3000,
@@ -20,12 +24,10 @@ const options = {
     logPath: process.env.LOG_PATH || '/var/log',
 };
 
-bodyParser = require('body-parser');
 app.use(helmet());
 app.use(logger('combined',{stream: fs.createWriteStream(options.logPath+'/remote-pdf-printer.log')}));
 app.use(bodyParser.urlencoded({limit: '10mb', extended: true }));
-const pdfRoutes = require('./api/routes/printPdfRoutes');
-const pngRoutes = require('./api/routes/printPngRoutes');
+
 pdfRoutes(app, formMulter);
 pngRoutes(app, formMulter);
 

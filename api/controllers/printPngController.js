@@ -7,112 +7,36 @@
  */
 'use strict';
 
-const uniqueFilename = require('unique-filename');
-const path = require('path');
-const fs = require('fs');
-const CDP = require('chrome-remote-interface');
+import uniqueFilename from 'unique-filename';
+import path from 'path';
+import fs from 'fs';
+import CDP from 'chrome-remote-interface';
+
+import {__dirname} from "../dirname/dirname.js";
+import {load, contentToDOM, dumpContentToDisk} from "../content/content.js";
+
+const exports = {};
 
 const options = {
-    port: process.env.CHROME_PORT || 1337,
-    debug: process.env.DEBUG || false,
+    port:          process.env.CHROME_PORT || 1337,
+    debug:         process.env.DEBUG || false,
     debug_sources: process.env.DEBUG || process.env.DEBUG_SOURCES || false,
-    dir: process.env.DIR || __dirname + '/../../files/'
+    dir:           process.env.DIR || __dirname + '/../../files/'
 };
 
-async function load(html) {
-    if (options.debug) {
-        console.log('Load(html) called');
-    }
-
-    let target = undefined;
-    try {
-        if (options.debug) {
-            console.log(`Load using ports ${options.port}`);
-        }
-
-        target = await CDP.New({port: options.port});
-        const client = await CDP({target});
-        const {Network, Page} = client;
-        await Promise.all([Network.enable(), Page.enable()]);
-        return new Promise(async (resolve, reject) => {
-            function complete(options) {
-                if (options.debug) {
-                    console.log('Load(html) *actually* resolved');
-                }
-                resolve(options);
-            }
-
-            let resolveOptions = {client: client, target: target};
-            let failed = false;
-            let completed = false;
-            let postResolvedRequests = [];
-            const url = /^(https?|file|data):/i.test(html) ? html : 'data:text/html;base64,' + Buffer.from(html).toString('base64');
-
-            Network.loadingFailed((params) => {
-                failed = true;
-
-                if (options.debug) {
-                    console.log(`Load(html) Network.loadingFailed: "${params.errorText}"`);
-                }
-
-                reject(new Error('Load(html) unable to load remote URL'));
-            });
-
-            Network.requestWillBeSent((params) => {
-                if (completed === true) {
-                    postResolvedRequests[params.requestId] = 1;
-                }
-
-                if (options.debug) {
-                    console.log(`Load(html) Request (${params.requestId}) will be sent: ${params.request.url}`);
-                }
-            });
-
-            Network.responseReceived((params) => {
-                if (options.debug) {
-                    console.log(`Load(html) Response Received: (${params.requestId}) Status: ${params.response.status}`);
-                }
-
-                if (completed === true) {
-                    delete postResolvedRequests[params.requestId];
-                    if (postResolvedRequests.length === 0) {
-                        clearTimeout(waitForResponse);
-                        complete(resolveOptions);
-                    }
-                }
-            });
-
-            Page.navigate({url});
-            await Page.loadEventFired();
-            if (options.debug) {
-                console.log('Load(html) resolved');
-            }
-
-            let waitForResponse = false;
-
-            if (failed) {
-                await CDP.Close({port: options.port, id: target.id});
-            }
-
-            completed = true;
-            waitForResponse = setTimeout(complete, 750, resolveOptions);
-        });
-    } catch (error) {
-        console.log(`Load(html) error: ${error}`);
-        if (target) {
-            console.log('Load(html) closing open target');
-            CDP.Close({port: options.port, id: target.id});
-        }
-    }
-}
-
 async function getPng(html, printOptions) {
-    const {client, target} = await load(html);
+    const {
+              client,
+              target
+          }      = await load(html, options);
     const {Page} = client;
 
     // https://chromedevtools.github.io/devtools-protocol/tot/Page#type-Viewport
     const png = await Page.captureScreenshot(printOptions);
-    await CDP.Close({port: options.port, id: target.id});
+    await CDP.Close({
+        port: options.port,
+        id:   target.id
+    });
 
     return png;
 }
@@ -128,7 +52,7 @@ function isFile(fullpath) {
 function servePng(res, filename) {
     let fullpath = `${options.dir}/pngs/${filename}`;
     if (options.debug) {
-        console.log('Requesting Filename: '+fullpath);
+        console.log('Requesting Filename: ' + fullpath);
     }
 
     if (!isFile(fullpath)) {
@@ -145,11 +69,11 @@ function servePng(res, filename) {
 function getPrintOptions(body) {
     let printOptions = {
         clip: {
-            x: 0,
-            y: 0,
-            width: 1020.0,
+            x:      0,
+            y:      0,
+            width:  1020.0,
             height: 150.0,
-            scale: 1
+            scale:  1
         }
     };
 
@@ -158,6 +82,16 @@ function getPrintOptions(body) {
     }
 
     if (body) {
+        body.headerSettings         = body.headerSettings || {};
+        body.footerSettings         = body.footerSettings || {};
+        printOptions.headerContent  = body.headerContent || null;
+        body.headerSettings.enabled = body.headerSettings.enabled === '1';
+        body.footerSettings.enabled = body.footerSettings.enabled === '1';
+        printOptions.marginTop      = 0;
+        printOptions.marginBottom   = 0;
+        printOptions.headerSettings = body.headerSettings;
+        printOptions.footerSettings = body.footerSettings;
+
         if (body.width) {
             printOptions.clip.width = parseFloat(body.width);
         } else if (options.debug) {
@@ -180,6 +114,13 @@ function getPrintOptions(body) {
     return printOptions;
 }
 
+function getDocument(html, printOptions) {
+    const document = contentToDOM(html, printOptions);
+    dumpContentToDisk(document.body.outerHTML, options);
+
+    return document.body.outerHTML;
+}
+
 exports.print = function (req, res) {
     let data = undefined;
 
@@ -192,7 +133,10 @@ exports.print = function (req, res) {
     }
 
     if (data === undefined) {
-        res.status(400).json({error: 'Unable to generate/save PNG!', message: 'No url / data submitted'});
+        res.status(400).json({
+            error:   'Unable to generate/save PNG!',
+            message: 'No url / data submitted'
+        });
         return;
     }
 
@@ -211,7 +155,7 @@ exports.print = function (req, res) {
 
     let printOptions = getPrintOptions(req.body);
 
-    getPng(req.body.data, printOptions).then(async (png) => {
+    getPng(getDocument(req.body.data, printOptions), printOptions).then(async (png) => {
         const randomPrefixedTmpFile = uniqueFilename(options.dir + '/pngs/');
 
         await fs.writeFileSync(randomPrefixedTmpFile, Buffer.from(png.data, 'base64'), (error) => {
@@ -235,7 +179,10 @@ exports.print = function (req, res) {
 
         servePng(res, filename);
     }).catch((error) => {
-        res.status(400).json({error: 'Unable to generate/save PNG!', message: error.message});
+        res.status(400).json({
+            error:   'Unable to generate/save PNG!',
+            message: error.message
+        });
         console.log(`Caught ${error}`);
     });
 };
@@ -251,3 +198,5 @@ exports.get_png = function (req, res) {
 
     servePng(res, file.replace('.png', ''));
 };
+
+export default exports;

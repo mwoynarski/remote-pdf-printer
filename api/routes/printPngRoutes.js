@@ -1,8 +1,7 @@
 'use strict';
 
-module.exports = function(app, formMulter) {
-    const pngPrinter = require('../controllers/printPngController');
-
+import pngPrinter from '../controllers/printPngController.js';
+export default function(app, formMulter) {
     // todoList Routes
     app.post('/png', formMulter.none(), pngPrinter.print);
 

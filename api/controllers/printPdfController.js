@@ -7,11 +7,19 @@
  */
 'use strict';
 
-const uniqueFilename = require('unique-filename');
-const path = require('path');
-const fs = require('fs');
-const CDP = require('chrome-remote-interface');
-const poppler = require('pdf-poppler');
+import uniqueFilename from 'unique-filename';
+import path from 'path';
+import fs from 'fs';
+import CDP from 'chrome-remote-interface';
+import poppler from 'pdf-poppler';
+import pad from 'pad-left';
+import {PDFDocument} from "pdf-lib";
+
+import {__dirname} from "../dirname/dirname.js";
+
+import {load, contentToDOM, dumpContentToDisk} from "../content/content.js";
+
+const exports = {};
 
 let headerFooterStyle = `<style type="text/css" media="print">
 		/* Do not edit below this line */
@@ -56,102 +64,25 @@ let headerFooterStyle = `<style type="text/css" media="print">
 </style>`;
 
 const options = {
-    port: process.env.CHROME_PORT || 1337,
-    debug: process.env.DEBUG || false,
+    port:          process.env.CHROME_PORT || 1337,
+    debug:         process.env.DEBUG || false,
     debug_sources: process.env.DEBUG || process.env.DEBUG_SOURCES || false,
-    dir: process.env.DIR || __dirname + '/../../files/'
+    dir:           process.env.DIR || __dirname + '/../../files/'
 };
 
-async function load(html) {
-    if (options.debug) {
-        console.log('Load(html) called');
-    }
-
-    let target = undefined;
-    try {
-        if (options.debug) {
-            console.log(`Load using ports ${options.port}`);
-        }
-
-        target = await CDP.New({port: options.port});
-        const client = await CDP({target});
-        const {Network, Page} = client;
-        await Promise.all([Network.enable(), Page.enable()]);
-        return new Promise(async (resolve, reject) => {
-            function complete(options) {
-                if (options.debug) {
-                    console.log('Load(html) *actually* resolved');
-                }
-                resolve(options);
-            }
-
-            let resolveOptions = {client: client, target: target};
-            let failed = false;
-            let completed = false;
-            let postResolvedRequests = [];
-            const url = /^(https?|file|data):/i.test(html) ? html : 'data:text/html;base64,' + Buffer.from(html).toString('base64');
-
-            Network.loadingFailed((params) => {
-                failed = true;
-
-                if (options.debug) {
-                    console.log(`Load(html) Network.loadingFailed: "${params.errorText}"`);
-                }
-
-                reject(new Error('Load(html) unable to load remote URL'));
-            });
-
-            Network.requestWillBeSent((params) => {
-                if (completed === true) {
-                    postResolvedRequests[params.requestId] = 1;
-                }
-            });
-
-            Network.responseReceived((params) => {
-                if (options.debug) {
-                    console.log(`Load(html) Response Received: (${params.requestId}) Status: ${params.response.status}`);
-                }
-
-                if (completed === true) {
-                    delete postResolvedRequests[params.requestId];
-                    if (postResolvedRequests.length === 0) {
-                        clearTimeout(waitForResponse);
-                        complete(resolveOptions);
-                    }
-                }
-            });
-
-            Page.navigate({url});
-            await Page.loadEventFired();
-            if (options.debug) {
-                console.log('Load(html) resolved');
-            }
-
-            let waitForResponse = false;
-
-            if (failed) {
-                await CDP.Close({port: options.port, id: target.id});
-            }
-
-            completed = true;
-            waitForResponse = setTimeout(complete, 750, resolveOptions);
-        });
-    } catch (error) {
-        console.log(`Load(html) error: ${error}`);
-        if (target) {
-            console.log('Load(html) closing open target');
-            CDP.Close({port: options.port, id: target.id});
-        }
-    }
-}
-
 async function getPdf(html, printOptions) {
-    const {client, target} = await load(html);
+    const {
+              client,
+              target
+          }      = await load(html, options);
     const {Page} = client;
 
     // https://chromedevtools.github.io/debugger-protocol-viewer/tot/Page/#method-printToPDF
     const pdf = await Page.printToPDF(printOptions);
-    await CDP.Close({port: options.port, id: target.id});
+    await CDP.Close({
+        port: options.port,
+        id:   target.id
+    });
 
     return pdf;
 }
@@ -172,35 +103,21 @@ function writeFile(fileName, pdfStream) {
     });
 }
 
-function returnPdfResponse(req, res, pathname) {
-    if (!req.body.download || req.body.download === false) {
-        let filename = path.basename(pathname) + '.pdf';
-        res.json({
-            pdf: filename,
-            url: req.protocol + '://' + req.get('host') + '/pdf/' + filename,
-        });
-        return;
-    }
-
-    servePdf(res, path.basename(pathname));
-}
-
-function returnPreviewResponse(req, res, pdfInfo, pathname) {
+async function returnPreviewResponse(req, res, pdfInfo, pathname) {
     let filename = path.basename(pathname);
-    let baseUrl = req.protocol + '://' + req.get('host') + '/pdf/preview/';
+    let baseUrl  = req.protocol + '://' + req.get('host') + '/pdf/preview/';
 
     let response = {
         success: true,
-        pages: pdfInfo.pages,
-        images: []
+        pages:   pdfInfo.pages,
+        images:  []
     };
 
-    const pad = require('pad-left');
     for (let x = 1; x <= pdfInfo.pages; x++) {
         response.images.push(baseUrl + filename + '-' + pad(x, pdfInfo.pages.length, '0') + '.jpg')
     }
 
-    res.json(response);
+    return response;
 }
 
 function writeFiles(pdfs, outputFile) {
@@ -229,10 +146,10 @@ async function combine(inputFiles, outputFile) {
 
 async function convert(outputFile) {
     let opts = {
-        format: 'jpeg',
-        out_dir: options.dir + '/previews/',
+        format:     'jpeg',
+        out_dir:    options.dir + '/previews/',
         out_prefix: path.basename(outputFile, '.pdf'),
-        page: null
+        page:       null
     };
 
     await poppler.convert(outputFile, opts);
@@ -253,7 +170,7 @@ function isFile(fullpath) {
 }
 
 function servePdf(res, filename) {
-    let fullpath = `${options.dir}/pdfs/${filename}`;
+    const fullpath = `${options.dir}/pdfs/${filename}`;
     if (options.debug) {
         console.log('Requesting Filename: ' + fullpath);
     }
@@ -265,7 +182,7 @@ function servePdf(res, filename) {
 
     res.setHeader('Content-disposition', `attachment; filename=${filename}.pdf`);
     res.setHeader('Content-type', 'application/pdf');
-    let stream = fs.createReadStream(fullpath);
+    const stream = fs.createReadStream(fullpath);
     stream.pipe(res);
 }
 
@@ -279,38 +196,48 @@ function getPrintOptions(body, res) {
     }
 
     if (body) {
-        if (body.header) {
-            if (!body.marginTop) {
+        body.headerSettings         = body.headerSettings || {};
+        body.footerSettings         = body.footerSettings || {};
+        body.headerSettings.enabled = body.headerSettings.enabled === '1';
+        body.footerSettings.enabled = body.footerSettings.enabled === '1';
+        printOptions.marginTop      = 0;
+        printOptions.marginBottom   = 0;
+
+        /** TODO: this code relates to using the Chrome printToPdf header component, rather than our current method of simply inserting a header element at the top of the page.
+         * Figure out if this can be made compatible with the footers - currently it looks like you can't have one with out the other?  There's only the single
+         * displayHeaderFooter param provided by the Chrome API.
+         */
+        // if (body.headerSettings.enabled) {
+        //     if (!body.headerSettings.height) {
+        //         res.status(400).json({
+        //             error:   'Unable to generate/save PDF!',
+        //             message: 'When providing a header template the height is required'
+        //         });
+        //     }
+        //
+        //     if (options.debug) {
+        //         console.log('Have Header');
+        //     }
+        //
+        //     printOptions.headerTemplate      = headerFooterStyle + body.header;
+        //     printOptions.footerTemplate      = '<footer></footer>';
+        //
+        //     let requestedMargin = parseFloat(body.headerSettings.height);
+        //     let adjustment      = 0.35;
+        //     if (requestedMargin - 1 > 0) {
+        //         adjustment += 0.35 * (requestedMargin - 1);
+        //     }
+        //
+        //     printOptions.marginTop = requestedMargin + adjustment; //accounts for the odd -0.16in margins
+        // } else if (options.debug) {
+        //     console.log('No Header');
+        // }
+
+        if (body.footerSettings.enabled) {
+            if (!body.footerSettings.height) {
                 res.status(400).json({
-                    error: 'Unable to generate/save PDF!',
-                    message: 'When providing a header template the marginTop is required'
-                });
-            }
-
-            if (options.debug) {
-                console.log('Have Header');
-            }
-
-            printOptions.displayHeaderFooter = true;
-            printOptions.headerTemplate = headerFooterStyle + body.header;
-            printOptions.footerTemplate = '<footer></footer>';
-
-            let requestedMargin = parseFloat(body.marginTop);
-            let adjustment = 0.35;
-            if (requestedMargin - 1 > 0) {
-                adjustment += 0.35 * (requestedMargin - 1);
-            }
-
-            printOptions.marginTop = requestedMargin + adjustment; //accounts for the odd -0.16in margins
-        } else if (options.debug) {
-            console.log('No Header');
-        }
-
-        if (body.footer) {
-            if (!body.marginBottom) {
-                res.status(400).json({
-                    error: 'Unable to generate/save PDF!',
-                    message: 'When providing a footer template the marginBottom is required'
+                    error:   'Unable to generate/save PDF!',
+                    message: 'When providing a footer template the height is required'
                 });
             }
 
@@ -319,13 +246,13 @@ function getPrintOptions(body, res) {
             }
 
             printOptions.displayHeaderFooter = true;
-            printOptions.footerTemplate = headerFooterStyle + body.footer;
+            printOptions.footerTemplate      = headerFooterStyle + body.footer;
             if (!printOptions.headerTemplate) {
                 printOptions.headerTemplate = '<header></header>';
             }
 
-            let requestedMargin = parseFloat(body.marginBottom);
-            let adjustment = 0.35;
+            let requestedMargin = parseFloat(body.footerSettings.height);
+            let adjustment      = 0.35;
             if (requestedMargin - 1 > 0) {
                 adjustment += 0.35 * (requestedMargin - 1);
             }
@@ -343,6 +270,10 @@ function getPrintOptions(body, res) {
             printOptions.marginRight = parseFloat(body.marginRight);
         }
 
+        printOptions.headerSettings = body.headerSettings;
+        printOptions.footerSettings = body.footerSettings;
+        printOptions.headerContent  = body.headerContent || null;
+
         if (!printOptions.hasOwnProperty('marginTop') && body.marginTop) {
             printOptions.marginTop = parseFloat(body.marginTop);
         }
@@ -351,12 +282,10 @@ function getPrintOptions(body, res) {
             printOptions.marginBottom = parseFloat(body.marginBottom);
         }
 
-        if(body.hasOwnProperty('paperSize') && body.paperSize)
-        {
-            printOptions.paperWidth = parseFloat(body.paperSize[0]);
+        if (body.hasOwnProperty('paperSize') && body.paperSize) {
+            printOptions.paperWidth  = parseFloat(body.paperSize[0]);
             printOptions.paperHeight = parseFloat(body.paperSize[1]);
         }
-
     }
 
     if (options.debug) {
@@ -367,7 +296,7 @@ function getPrintOptions(body, res) {
 }
 
 function servePreview(res, filename) {
-    let fullpath = `${options.dir}/previews/${filename}`;
+    const fullpath = `${options.dir}/previews/${filename}`;
     if (options.debug) {
         console.log('Requesting Filename: ' + fullpath);
     }
@@ -379,7 +308,7 @@ function servePreview(res, filename) {
 
     res.setHeader('Content-disposition', `attachment; filename=${filename}`);
     res.setHeader('Content-type', 'image/jpeg');
-    let stream = fs.createReadStream(fullpath);
+    const stream = fs.createReadStream(fullpath);
     stream.pipe(res);
 }
 
@@ -396,14 +325,18 @@ function getData(req) {
 }
 
 exports.print = function (req, res) {
-    let data = getData(req);
+    const randomPrefixedTmpFile = uniqueFilename(options.dir + '/pdfs/');
+    let data                    = getData(req);
 
     if (!data) {
         if (options.debug) {
             console.error('Unable to retrieve data to generate PDF!');
         }
 
-        res.status(400).json({error: 'Unable to retrieve data to generate PDF!', message: 'No url / data submitted'});
+        res.status(400).json({
+            error:   'Unable to retrieve data to generate PDF!',
+            message: 'No url / data submitted'
+        });
         return;
     }
 
@@ -411,138 +344,268 @@ exports.print = function (req, res) {
         console.log('Request Content-Length: ' + (data.length / 1024) + 'kb');
     }
 
-    if (options.debug_sources) {
-        const randomPrefixedHtmlFile = uniqueFilename(options.dir + '/sources/');
-        fs.writeFile(randomPrefixedHtmlFile, data, (error) => {
-            if (error) {
-                throw error;
-            }
-        });
+    const toPrint = getDocuments(data, getPrintOptions(req.body, res));
+    let documents = [];
 
-        console.log(`Wrote HTML file ${randomPrefixedHtmlFile} successfully`);
+    for (const [suffix, files] of Object.entries(toPrint)) {
+        if (!files.length) {
+            break;
+        }
+
+        const filename = randomPrefixedTmpFile + '__' + suffix;
+
+        documents.push(Promise
+            .all(files)
+            .then((pdfs) => {
+                return new Promise(resolve => {
+                    writeFile(filename, pdfs[0])
+                        .then(() => {
+                            resolve(filename);
+                        })
+                        .catch((error) => {
+                            console.log(`Caught Error ${error}`);
+                            res.status(400).json({error: 'Unable to generate PDF!'});
+                        });
+
+                });
+            })
+            .catch((error) => {
+                console.log(`Caught Error ${error}`);
+                res.status(400).json({error: 'Unable to generate PDF!'});
+            }));
     }
 
-    let printOptions = getPrintOptions(req.body, res);
+    Promise.all(documents).then(responses => {
+        mergePdfs(responses).then(pathname => {
+            if (!req.body.download || req.body.download === '0') {
+                const filename = path.basename(pathname) + '.pdf';
 
-    let promises = [];
-    data.forEach(function (element) {
-        promises.push(getPdf(element, printOptions));
-    });
-
-    Promise
-        .all(promises)
-        .then((pdfs) => {
-            const randomPrefixedTmpFile = uniqueFilename(options.dir + '/pdfs/');
-            if (pdfs.length === 1) {
-                writeFile(randomPrefixedTmpFile, pdfs[0])
-                    .then(() => {
-                        return returnPdfResponse(req, res, randomPrefixedTmpFile);
-                    })
-                    .catch((error) => {
-                        console.log(`Caught Error ${error}`);
-                        res.status(400).json({error: 'Unable to generate PDF!'});
-                    });
+                res.status(200);
+                res.json({
+                    pdf: filename,
+                    url: req.protocol + '://' + req.get('host') + '/pdf/' + filename,
+                });
 
                 return;
             }
 
-            writeFiles(pdfs, randomPrefixedTmpFile)
-                .then((inputFiles) => {
-                    return combine(inputFiles, randomPrefixedTmpFile);
-                })
-                .then((outputFile) => {
-                    returnPdfResponse(req, res, outputFile);
-                })
-                .catch((error) => {
-                    console.log(`Caught Error ${error}`);
-                    res.status(400).json({error: 'Unable to generate PDF!'});
-                });
-        })
-        .catch((error) => {
-            console.log(`Caught Error ${error}`);
-            res.status(400).json({error: 'Unable to generate PDF!'});
+            servePdf(res, path.basename(pathname));
+        }).catch(error => {
+            console.log(`Caught: ${error}`);
+            res.status(400).json({error: 'Unable to generate PDF document!'});
         });
+    });
 };
 
+function getMergePrintOptions(printOptions) {
+    let printOptions2 = JSON.parse(JSON.stringify(printOptions));
+
+    // This second document will be the latter part of the combined file, where we do not want a footer. Remove it.
+    printOptions2.footerSettings      = null;
+    printOptions2.footerTemplate      = '';
+    printOptions2.displayHeaderFooter = false;
+    printOptions2.marginBottom        = 0;
+
+    return printOptions2;
+}
+
+function updateHeaderDimensionsForFooter(document, printOptions) {
+    let headerHeight    = ((parseFloat(printOptions.headerSettings.height || '0.0') * 10000) + (printOptions.marginBottom * 10000)) / 10000; //Add the footer height to the header so the initial page break is in the same place
+    const header        = document.querySelector('header');
+    headerHeight += 0.4; // There is a 0.4 inch difference in presentation between having a header and footer, and a header with the height of both.  This seems to correspond to an implicit 0.4" margin we've noticed Chrome add to all printed pages, but I don't really have an explanation beyond that.
+    header.style.height = headerHeight + 'in';// We fetch the html content with document.body.outerHTML, so we don't need to clone this because it's just a string, not an obj reference
+}
+
+function getDocuments(data, printOptions) {
+    let toPrint = {
+        base:    [],
+        toMerge: []
+    };
+    data.forEach(function (content) {
+        const document = contentToDOM(content, printOptions);
+        dumpContentToDisk(document.body.outerHTML, options);
+        toPrint.base.push(getPdf(document.body.outerHTML, printOptions));
+
+        if (printOptions.footerSettings && printOptions.footerSettings.location === 'first')// Create a second document
+        {
+            updateHeaderDimensionsForFooter(document, printOptions);
+            toPrint.toMerge.push(getPdf(document.body.outerHTML, getMergePrintOptions(printOptions)));
+            dumpContentToDisk(document.body.outerHTML, options);
+        }
+    });
+
+    return toPrint;
+}
+
 exports.preview = function (req, res) {
-    let data = getData(req, res);
+    const randomPrefixedTmpFile = uniqueFilename(options.dir + '/pdfs/');
+    const data                  = getData(req);
 
     if (data && options.debug) {
         console.log('Request Content-Length: ' + (data.length / 1024) + 'kb');
     }
 
-    if (options.debug_sources) {
-        const randomPrefixedHtmlFile = uniqueFilename(options.dir + '/sources/');
-        fs.writeFile(randomPrefixedHtmlFile, data, (error) => {
-            if (error) {
-                throw error;
-            }
-        });
+    let toPrint = getDocuments(data, getPrintOptions(req.body, res));
 
-        console.log(`Wrote HTML file ${randomPrefixedHtmlFile} successfully`);
+    let documents = [];
+
+    // We can generate previews for multiple documents at the same time
+    for (const [suffix, files] of Object.entries(toPrint)) {
+        if (!files.length) {
+            break;
+        }
+
+        const filename = randomPrefixedTmpFile + '__' + suffix;
+        documents.push(Promise
+            .all(files)
+            .then((pdfs) => {
+                if (pdfs.length === 1) {
+                    return new Promise(resolve => {
+                        let pdfInfo;
+                        writeFile(filename, pdfs[0])
+                            .then((outputFile) => {
+                                return info(outputFile).then((info) => {
+                                    pdfInfo = info;
+                                    return outputFile;
+                                });
+                            })
+                            .then((outputFile) => {
+                                return convert(outputFile);
+                            })
+                            .then((outputFile) => {
+                                resolve(returnPreviewResponse(req, res, pdfInfo, outputFile));
+                            })
+                            .catch((error) => {
+                                console.log(`Caught: ${error}`);
+                                res.status(400).json({error: 'Unable to generate PDF preview!'});
+                            });
+                    });
+                }
+
+                // else
+                return new Promise(resolve => {
+                    let pdfInfo;
+                    writeFiles(pdfs, filename)
+                        .then((inputFiles) => {
+                            return combine(inputFiles, filename);
+                        })
+                        .then((outputFile) => {
+                            return info(outputFile).then((info) => {
+                                pdfInfo = info;
+                                return outputFile;
+                            });
+                        })
+                        .then((outputFile) => {
+                            return convert(outputFile);
+                        })
+                        .then((outputFile) => {
+                            resolve(returnPreviewResponse(req, res, pdfInfo, outputFile));
+                        })
+                        .catch((error) => {
+                            console.log(`Caught Error: ${error}`);
+                            res.status(400).json({error: 'Unable to generate PDF preview!'});
+                        });
+                });
+            })
+            .catch((error) => {
+                console.log(`Caught: ${error}`);
+                res.status(400).json({error: 'Unable to generate PDF preview!'});
+            }));
     }
 
-    let printOptions = getPrintOptions(req.body, res);
-
-    let promises = [];
-    data.forEach(function (element) {
-        promises.push(getPdf(element, printOptions));
+    Promise.all(documents).then(responses => {
+        res.json(mergeResponses(responses));
     });
+};
 
-    Promise
-        .all(promises)
-        .then((pdfs) => {
-            const randomPrefixedTmpFile = uniqueFilename(options.dir + '/pdfs/');
-            if (pdfs.length === 1) {
-                let pdfInfo = undefined;
-                writeFile(randomPrefixedTmpFile, pdfs[0])
-                    .then((outputFile) => {
-                        info(outputFile).then((info) => {
-                            pdfInfo = info;
-                        });
-                        return outputFile;
-                    })
-                    .then((outputFile) => {
-                        return convert(outputFile);
-                    })
-                    .then((outputFile) => {
-                        returnPreviewResponse(req, res, pdfInfo, outputFile);
-                    })
-                    .catch((error) => {
-                        console.log(`Caught: ${error}`);
-                        res.status(400).json({error: 'Unable to generate PDF preview!'});
-                    });
+function mergeResponses(responses) {
+    let response = responses[0];
 
-                return;
+    if (responses.length === 2) {
+        const baseResponse  = responses[0].images[0].includes('__base') ? responses[0] : responses[1];
+        const mergeResponse = baseResponse === responses[0] ? responses[1] : responses[0];
+
+        //Grab the first page of the base response, the remaining pages of the merge response, combine them, and return the result.
+        response = {...baseResponse};//clone baseResponse to the main response because we still need the rest of the fields
+        mergeResponse.images.shift();
+        response.images = [baseResponse.images.shift(), ...mergeResponse.images];
+    }
+
+    return response;
+}
+
+/**
+ * @returns {Promise<PDFDocument>}
+ */
+async function getPdfFile(file) {
+    return new Promise((resolve, reject) => {
+        fs.readFile(file, async (err, data) => {
+            if (err) {
+                return reject(err);
+            }
+            const document = await PDFDocument.load(data)
+            resolve(document);
+        });
+    }).catch(err => {
+        throw err;
+    });
+}
+
+async function writePdfFile(filename, content) {
+    return new Promise(async (resolve, reject) => {
+        fs.writeFile(filename, content, err => {
+            if (err) {
+                return reject(err);
             }
 
-            let pdfInfo = undefined;
-            writeFiles(pdfs, randomPrefixedTmpFile)
-                .then((inputFiles) => {
-                    return combine(inputFiles, randomPrefixedTmpFile);
-                })
-                .then((outputFile) => {
-                    info(outputFile).then((info) => {
-                        pdfInfo = info;
-                    });
-                    return outputFile;
-                })
-                .then((outputFile) => {
-                    return convert(outputFile);
-                })
-                .then((outputFile) => {
-                    returnPreviewResponse(req, res, pdfInfo, outputFile);
-                })
-                .catch((error) => {
-                    console.log(`Caught Error: ${error}`);
-                    res.status(400).json({error: 'Unable to generate PDF preview!'});
-                });
-        })
-        .catch((error) => {
-            console.log(`Caught: ${error}`);
-            res.status(400).json({error: 'Unable to generate PDF preview!'});
+            resolve();
         });
-};
+    }).catch(err => {
+        throw err;
+    });
+}
+
+async function mergePdfs(files) {
+    return new Promise(async (resolve, reject) => {
+        if (files.length === 2) {
+            const baseFile   = files[0].includes('__base') ? files[0] : files[1];
+            const outputFile = baseFile.replace('__base', '');
+            const mergeFile  = baseFile === files[0] ? files[1] : files[0];
+            let baseDoc;
+            let mergeDoc;
+
+            // we only have the raw file content; produce actual PDF files that we can manipulate
+            try {
+                baseDoc  = await getPdfFile(baseFile);
+                mergeDoc = await getPdfFile(mergeFile);
+            } catch (err) {
+                return reject(err);
+            }
+
+            const outputDoc   = await PDFDocument.create(); // Create the single file we will return
+            const [firstPage] = await outputDoc.copyPages(baseDoc, [0]); // grab the first page of the base file
+            let indices       = [...Array(mergeDoc.getPages().length).keys()]; // copyPages requires an array of individual page numbers, so create an array that has an index for every page in the document
+            indices.shift(); //Remove the first page from the file to be merged
+            const remainingPages = await outputDoc.copyPages(mergeDoc, [...indices]); // grab the remaining pages from the second file
+            outputDoc.addPage(firstPage);// pdf-lib requires that we manually append the pages for some reason, even though we've already copied them
+            remainingPages.forEach(page => outputDoc.addPage(page));
+
+            const outputBytes = await outputDoc.save();
+
+            try {
+                await writePdfFile(outputFile, outputBytes);
+            } catch (err) {
+                return reject(err);
+            }
+
+            resolve(outputFile);
+        }
+
+        resolve(files[0]);
+    }).catch(err => {
+        throw err;
+    });
+}
 
 exports.get_pdf = function (req, res) {
     const {file} = req.params;
@@ -567,3 +630,5 @@ exports.get_preview = function (req, res) {
 
     servePreview(res, file);
 };
+
+export default exports;

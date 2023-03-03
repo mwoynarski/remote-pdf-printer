@@ -1,8 +1,8 @@
 'use strict';
 
-module.exports = function(app, formMulter) {
-    const pdfPrinter = require('../controllers/printPdfController');
+import pdfPrinter from '../controllers/printPdfController.js';
 
+export default function(app, formMulter) {
     app.post('/pdf', formMulter.none(), pdfPrinter.print);
 
     app.post('/pdf/preview', formMulter.none(), pdfPrinter.preview);
